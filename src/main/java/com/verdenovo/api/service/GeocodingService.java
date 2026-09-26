@@ -23,6 +23,9 @@ public class GeocodingService {
     private static final String NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
     private static final String GEOAPIFY_URL = "https://api.geoapify.com/v1/geocode/search";
     private static final String BRASILAPI_CEP_URL = "https://brasilapi.com.br/api/cep/v2/";
+    // Geoapify's validation guidance uses 0.95 as an acceptance threshold; lower scores need review.
+    private static final double CONFIANCA_MINIMA_ENDERECO = 0.95;
+    private static final double CONFIANCA_MINIMA_IMOVEL = 0.95;
 
     @Value("${GEOAPIFY_API_KEY:}")
     private String geoapifyApiKey;
@@ -47,22 +50,33 @@ public class GeocodingService {
             String numero,
             String cep
     ) {
+        return geocodificarPrecisamente(logradouro, numero, cep, "outro", null);
+    }
+
+    public Optional<Coordenadas> geocodificarPrecisamente(
+            String logradouro,
+            String numero,
+            String cep,
+            String operacao,
+            Long pontoId
+    ) {
         String cepLimpo = limparCep(cep);
         String endereco = montarEndereco(logradouro, numero, cepLimpo);
-        log.info("[Geocoding] GEOAPIFY_API_KEY configurada: {}",
-                geoapifyApiKey != null && !geoapifyApiKey.isBlank());
+        log.info("[Geocoding] operacao={} pontoId={} GEOAPIFY_API_KEY configurada={}",
+                operacao, pontoId, geoapifyApiKey != null && !geoapifyApiKey.isBlank());
         if (endereco.isBlank() || numero == null || numero.isBlank()
                 || "S/N".equalsIgnoreCase(numero.trim())) {
-            log.info("[Geocoding] Busca precisa ignorada: logradouro ou número confirmado insuficiente");
+            log.info("[Geocoding] operacao={} pontoId={} busca precisa ignorada: logradouro ou número insuficiente",
+                    operacao, pontoId);
             return Optional.empty();
         }
 
         if (geoapifyApiKey != null && !geoapifyApiKey.isBlank()) {
-            Optional<Coordenadas> geoapify = tentarGeoapify(endereco, numero);
+            Optional<Coordenadas> geoapify = tentarGeoapify(endereco, numero, operacao, pontoId);
             if (geoapify.isPresent()) return geoapify;
         }
 
-        return tentarNominatimEnderecoExato(endereco, numero);
+        return tentarNominatimEnderecoExato(endereco, numero, operacao, pontoId);
     }
 
     /**
@@ -76,12 +90,12 @@ public class GeocodingService {
                 geoapifyApiKey != null && !geoapifyApiKey.isBlank());
 
         if (geoapifyApiKey != null && !geoapifyApiKey.isBlank() && !endereco.isBlank()) {
-            Optional<Coordenadas> geoapify = tentarGeoapify(endereco, numero);
+            Optional<Coordenadas> geoapify = tentarGeoapify(endereco, numero, "geocoding", null);
             if (geoapify.isPresent()) return geoapify;
         }
 
         if (!endereco.isBlank()) {
-            Optional<Coordenadas> nominatim = tentarNominatimEnderecoExato(endereco, numero);
+            Optional<Coordenadas> nominatim = tentarNominatimEnderecoExato(endereco, numero, "geocoding", null);
             if (nominatim.isPresent()) return nominatim;
         }
 
@@ -95,7 +109,9 @@ public class GeocodingService {
         return Optional.empty();
     }
 
-    private Optional<Coordenadas> tentarGeoapify(String endereco, String numeroEsperado) {
+    private Optional<Coordenadas> tentarGeoapify(
+            String endereco, String numeroEsperado, String operacao, Long pontoId
+    ) {
         try {
             String query = "text=" + URLEncoder.encode(endereco, StandardCharsets.UTF_8)
                     + "&format=json&limit=5&filter=countrycode:br&lang=pt"
@@ -109,25 +125,28 @@ public class GeocodingService {
                     .GET()
                     .build();
 
-            log.info("[Geocoding] Iniciando chamada ao Geoapify");
+            log.info("[Geocoding] operacao={} pontoId={} chamada ao Geoapify iniciada", operacao, pontoId);
             aguardarIntervaloGeoapify();
             HttpResponse<String> response = httpClient.send(
                     request,
                     HttpResponse.BodyHandlers.ofString()
             );
-            log.info("[Geocoding] Chamada ao Geoapify concluída; status HTTP={}", response.statusCode());
+            log.info("[Geocoding] operacao={} pontoId={} Geoapify status HTTP={}",
+                    operacao, pontoId, response.statusCode());
             if (response.statusCode() != 200) {
-                log.warn("[Geocoding] Geoapify retornou status HTTP não-200");
+                log.warn("[Geocoding] operacao={} pontoId={} Geoapify retornou status HTTP não-200",
+                        operacao, pontoId);
                 return Optional.empty();
             }
 
             JsonNode results = objectMapper.readTree(response.body()).path("results");
             if (!results.isArray()) {
-                log.warn("[Geocoding] Resposta do Geoapify sem array 'results'");
+                log.warn("[Geocoding] operacao={} pontoId={} resposta sem array de resultados",
+                        operacao, pontoId);
                 return Optional.empty();
             }
             if (results.isEmpty()) {
-                log.info("[Geocoding] Resposta do Geoapify sem resultados");
+                log.info("[Geocoding] operacao={} pontoId={} Geoapify sem resultados", operacao, pontoId);
                 return Optional.empty();
             }
 
@@ -141,37 +160,40 @@ public class GeocodingService {
                 String tipo = result.path("result_type").asText("desconhecido");
                 double confianca = rank.path("confidence").asDouble(-1);
                 double confiancaEdificio = rank.path("confidence_building_level").asDouble(-1);
-                log.info("[Geocoding] Resultado {}: tipo={}, número retornado={}, confiança={}, confiança do nível do imóvel={}",
-                        indice, tipo, !numeroBruto.isBlank(), confianca, confiancaEdificio);
+                log.info("[Geocoding] operacao={} pontoId={} resultado={} tipo={} numeroRetornado={} confiança={} confiançaImovel={}",
+                        operacao, pontoId, indice, tipo, !numeroBruto.isBlank(), confianca, confiancaEdificio);
 
                 // Quando o cadastro tem número, exige que o resultado confirme esse número.
                 if (!numeroNormalizado.isBlank()
                         && !numeroNormalizado.equals(numeroEncontrado)) {
-                    log.info("[Geocoding] Resultado {} rejeitado: número do imóvel ausente ou diferente do solicitado",
-                            indice);
+                    log.info("[Geocoding] operacao={} pontoId={} resultado={} rejeitado: número do imóvel ausente ou diferente",
+                            operacao, pontoId, indice);
                     continue;
                 }
 
-                if (!numeroNormalizado.isBlank()
-                        && rank.path("confidence_building_level").asDouble(0) <= 0) {
-                    log.info("[Geocoding] Resultado {} rejeitado: nível de confiança do imóvel não é positivo",
-                            indice);
+                if (confianca < CONFIANCA_MINIMA_ENDERECO
+                        || confiancaEdificio < CONFIANCA_MINIMA_IMOVEL) {
+                    log.info("[Geocoding] operacao={} pontoId={} resultado={} rejeitado: confiança abaixo dos mínimos {} e {}",
+                            operacao, pontoId, indice,
+                            CONFIANCA_MINIMA_ENDERECO, CONFIANCA_MINIMA_IMOVEL);
                     continue;
                 }
 
                 Optional<Coordenadas> coordenadas = lerCoordenadas(result);
                 if (coordenadas.isPresent()) {
-                    log.info("[Geocoding] Resultado {} aceito: passou a validação do número e as coordenadas são válidas",
-                            indice);
+                    Coordenadas coords = coordenadas.get();
+                    log.info("[Geocoding] operacao={} pontoId={} resultado={} aceito lat={} lon={}",
+                            operacao, pontoId, indice, coords.latitude(), coords.longitude());
                     return coordenadas;
                 }
-                log.info("[Geocoding] Resultado {} rejeitado: coordenadas ausentes ou inválidas", indice);
+                log.info("[Geocoding] operacao={} pontoId={} resultado={} rejeitado: coordenadas ausentes ou inválidas",
+                        operacao, pontoId, indice);
             }
         } catch (Exception e) {
             // Não registrar a mensagem: exceções HTTP podem incluir a URI com a chave.
             if (e instanceof InterruptedException) Thread.currentThread().interrupt();
-            log.warn("[Geocoding] Falha ao consultar ou interpretar a resposta do Geoapify ({})",
-                    e.getClass().getSimpleName());
+            log.warn("[Geocoding] operacao={} pontoId={} falha no Geoapify ({})",
+                    operacao, pontoId, e.getClass().getSimpleName());
         }
 
         return Optional.empty();
@@ -179,7 +201,9 @@ public class GeocodingService {
 
     private Optional<Coordenadas> tentarNominatimEnderecoExato(
             String endereco,
-            String numeroEsperado
+            String numeroEsperado,
+            String operacao,
+            Long pontoId
     ) {
         try {
             String query = "q=" + URLEncoder.encode(endereco, StandardCharsets.UTF_8)
@@ -215,14 +239,15 @@ public class GeocodingService {
 
                 Optional<Coordenadas> coordenadas = lerCoordenadas(result);
                 if (coordenadas.isPresent()) {
-                    log.info("[Geocoding] Resultado do Nominatim aceito após validação do número e das coordenadas");
+                    log.info("[Geocoding] operacao={} pontoId={} Nominatim aceito lat={} lon={}",
+                            operacao, pontoId, coordenadas.get().latitude(), coordenadas.get().longitude());
                     return coordenadas;
                 }
             }
         } catch (Exception e) {
             if (e instanceof InterruptedException) Thread.currentThread().interrupt();
-            log.warn("[Geocoding] Falha ao consultar Nominatim por endereço ({})",
-                    e.getClass().getSimpleName());
+            log.warn("[Geocoding] operacao={} pontoId={} falha no Nominatim ({})",
+                    operacao, pontoId, e.getClass().getSimpleName());
         }
 
         return Optional.empty();
