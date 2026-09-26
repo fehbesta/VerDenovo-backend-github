@@ -37,20 +37,27 @@ public class PontoService {
     public Ponto loginPonto(String email, String senha) {
         Ponto ponto = pontoRepository.findByEmailAndStatusPonto(email, "ATIVO")
                 .orElseThrow(() -> new RuntimeException("Credenciais inválidas"));
+
         if (ponto.getSenha() == null || !passwordEncoder.matches(senha, ponto.getSenha())) {
             throw new RuntimeException("Credenciais inválidas");
         }
+
         return ponto;
     }
 
     public Ponto atualizarPonto(Long id, Ponto pontoAtualizado, String emailLogado) {
         Ponto ponto = pontoRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Ponto não encontrado"));
+
         boolean isAdmin = usuarioRepository.findByEmail(emailLogado)
                 .map(u -> "ADMIN".equals(u.getNivelAcesso()))
                 .orElse(false);
+
         if (!isAdmin) {
-            Long usuarioId = usuarioRepository.findByEmail(emailLogado).map(u -> u.getId()).orElse(null);
+            Long usuarioId = usuarioRepository.findByEmail(emailLogado)
+                    .map(u -> u.getId())
+                    .orElse(null);
+
             if (usuarioId == null || !usuarioId.equals(ponto.getUsuarioId())) {
                 throw new RuntimeException("Sem permissão para editar este ponto.");
             }
@@ -60,8 +67,7 @@ public class PontoService {
                 || !Objects.equals(ponto.getNumero(), pontoAtualizado.getNumero())
                 || !Objects.equals(ponto.getLogradouro(), pontoAtualizado.getLogradouro());
 
-        // CNPJ não é editável por este formulário (campo somente-leitura no frontend),
-        // então propositalmente não é sobrescrito aqui — evita apagar o valor gravado no cadastro.
+        // CNPJ não é editável por este formulário, então não é sobrescrito aqui.
         ponto.setNome(pontoAtualizado.getNome());
         ponto.setCep(pontoAtualizado.getCep());
         ponto.setNumero(pontoAtualizado.getNumero());
@@ -96,7 +102,11 @@ public class PontoService {
 
         codificarSenha(ponto);
         ponto.setDataCadastro(LocalDateTime.now());
-        if (ponto.getStatusPonto() == null) ponto.setStatusPonto("PENDENTE");
+
+        if (ponto.getStatusPonto() == null) {
+            ponto.setStatusPonto("PENDENTE");
+        }
+
         if (ponto.getCategoriaId() == null) {
             ponto.setCategoriaId(obterCategoriaPadraoId());
         }
@@ -106,25 +116,32 @@ public class PontoService {
         return pontoRepository.save(ponto);
     }
 
-    /**
-     * Tenta encontrar as coordenadas do endereço informado e preenche latitude/longitude
-     * do Ponto. Se a geocodificação falhar (sem internet, endereço não encontrado etc.),
-     * o cadastro continua normalmente sem coordenadas — o ponto só não terá pin no mapa
-     * do app mobile até ser corrigido.
-     */
+    public Ponto regeocodificarPonto(Long id) {
+        Ponto ponto = pontoRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Ponto não encontrado."));
+
+        GeocodingService.Coordenadas coordenadas = geocodingService
+                .geocodificar(ponto.getLogradouro(), ponto.getNumero(), ponto.getCep())
+                .orElseThrow(() -> new RuntimeException(
+                        "Não foi possível localizar o endereço. Confira rua, número e CEP."));
+
+        ponto.setLatitude(coordenadas.latitude());
+        ponto.setLongitude(coordenadas.longitude());
+
+        return pontoRepository.save(ponto);
+    }
+
     private void geocodificarEAtribuir(Ponto ponto) {
         geocodingService.geocodificar(ponto.getLogradouro(), ponto.getNumero(), ponto.getCep())
                 .ifPresentOrElse(coords -> {
                     ponto.setLatitude(coords.latitude());
                     ponto.setLongitude(coords.longitude());
-                }, () -> log.info("Não foi possível geocodificar o endereço do ponto '{}'", ponto.getNome()));
+                }, () -> log.info(
+                        "Não foi possível geocodificar o endereço do ponto '{}'",
+                        ponto.getNome()
+                ));
     }
 
-    /**
-     * Retorna o id da categoria padrão ("Geral", criada automaticamente pelo DataInitializer)
-     * para pontos cadastrados sem categoria específica. Se por algum motivo ela não existir,
-     * cai para a primeira categoria ativa disponível.
-     */
     private Long obterCategoriaPadraoId() {
         return categoriaRepository.findByStatusCategoria("ATIVO").stream()
                 .filter(c -> "Geral".equalsIgnoreCase(c.getNome()))
@@ -136,21 +153,28 @@ public class PontoService {
 
     private void vincularPontoAdmin(Ponto ponto, String emailLogado) {
         String emailDono = (ponto.getEmail() != null && !ponto.getEmail().isEmpty())
-                ? ponto.getEmail() : emailLogado;
+                ? ponto.getEmail()
+                : emailLogado;
+
         usuarioRepository.findByEmail(emailDono)
                 .ifPresent(dono -> ponto.setUsuarioId(dono.getId()));
+
         if (ponto.getEmail() == null || ponto.getEmail().isEmpty()) {
             ponto.setEmail(emailLogado);
         }
+
         ponto.setStatusPonto("ATIVO");
     }
 
     private void vincularPontoUsuario(Ponto ponto, Long usuarioId) {
         boolean jaTemPonto = pontoRepository.findByUsuarioId(usuarioId).stream()
-                .anyMatch(p -> "ATIVO".equals(p.getStatusPonto()) || "PENDENTE".equals(p.getStatusPonto()));
+                .anyMatch(p -> "ATIVO".equals(p.getStatusPonto())
+                        || "PENDENTE".equals(p.getStatusPonto()));
+
         if (jaTemPonto) {
             throw new RuntimeException("Você já possui um ponto de coleta cadastrado.");
         }
+
         ponto.setUsuarioId(usuarioId);
         ponto.setStatusPonto("PENDENTE");
     }
@@ -159,7 +183,9 @@ public class PontoService {
         if (ponto.getSenha() != null && !ponto.getSenha().isEmpty()) {
             ponto.setSenha(passwordEncoder.encode(ponto.getSenha()));
         } else {
-            ponto.setSenha(passwordEncoder.encode(java.util.UUID.randomUUID().toString().substring(0, 12)));
+            ponto.setSenha(passwordEncoder.encode(
+                    java.util.UUID.randomUUID().toString().substring(0, 12)
+            ));
         }
     }
 }
