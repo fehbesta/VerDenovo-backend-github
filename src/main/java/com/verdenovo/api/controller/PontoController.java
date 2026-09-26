@@ -56,6 +56,11 @@ public class PontoController {
         return ResponseEntity.ok(new MessageResponse("Ponto atualizado com sucesso"));
     }
 
+    @PostMapping("/{id}/regeocodificar")
+    public ResponseEntity<Ponto> regeocodificarPonto(@PathVariable Long id) {
+        return ResponseEntity.ok(pontoService.regeocodificarPonto(id));
+    }
+
     @GetMapping("/pendentes")
     public List<Ponto> listarPontosPendentes() {
         return pontoRepository.findByStatusPonto("PENDENTE");
@@ -102,11 +107,6 @@ public class PontoController {
         pontoRepository.deleteById(id);
         return ResponseEntity.ok(new MessageResponse("Ponto excluído com sucesso"));
     }
-
-    @PostMapping("/{id}/regeocodificar")
-    public ResponseEntity<Ponto> regeocodificarPonto(@PathVariable Long id) {
-        return ResponseEntity.ok(pontoService.regeocodificarPonto(id));
-}
     
     @PostMapping("/login")
     public ResponseEntity<PontoLoginResponse> loginPonto(@RequestBody PontoLoginRequest request) {

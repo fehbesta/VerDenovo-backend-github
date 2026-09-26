@@ -20,6 +20,8 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<MessageResponse> handleGenericException(Exception e) {
+        // Keep the response generic for the app, but record the cause in Render logs
+        // so infrastructure/database failures can be diagnosed without exposing internals.
         log.error("Erro não tratado ao processar requisição da API", e);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(new MessageResponse("Erro interno do servidor. Tente novamente."));
