@@ -26,7 +26,7 @@ public class GeocodingService {
     // Limites conservadores configurados pelo produto; a Geoapify sugere 0.95/0.2 como exemplo,
     // mas documenta que confiança baixa não prova erro e que os limites dependem da precisão exigida.
     private static final double CONFIANCA_MINIMA_ENDERECO = 0.10;
-    private static final double CONFIANCA_MINIMA_IMOVEL = 0.95;
+    private static final double CONFIANCA_MINIMA_IMOVEL = 0.65;
 
     @Value("${GEOAPIFY_API_KEY:}")
     private String geoapifyApiKey;
