@@ -52,6 +52,8 @@ public class SecurityConfig {
                 .requestMatchers(org.springframework.http.HttpMethod.PUT, "/api/pontos/*/aprovar").hasAuthority("ADMIN")
                 .requestMatchers(org.springframework.http.HttpMethod.PUT, "/api/pontos/*/rejeitar").hasAuthority("ADMIN")
                 .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/pontos/*/regeocodificar").hasAuthority("ADMIN")
+                .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/pontos/regeocodificar/lote").hasAuthority("ADMIN")
+                .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/pontos/regeocodificar/lote/status").hasAuthority("ADMIN")
                 .requestMatchers(org.springframework.http.HttpMethod.DELETE, "/api/pontos/*").hasAuthority("ADMIN")
                 .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/pontos").authenticated()
                 .anyRequest().authenticated()

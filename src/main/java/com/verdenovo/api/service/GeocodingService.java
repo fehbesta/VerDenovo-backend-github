@@ -31,6 +31,8 @@ public class GeocodingService {
             .connectTimeout(Duration.ofSeconds(8))
             .build();
 
+    private long proximaChamadaGeoapifyNanos;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public record Coordenadas(double latitude, double longitude) {}
@@ -49,7 +51,11 @@ public class GeocodingService {
         String endereco = montarEndereco(logradouro, numero, cepLimpo);
         log.info("[Geocoding] GEOAPIFY_API_KEY configurada: {}",
                 geoapifyApiKey != null && !geoapifyApiKey.isBlank());
-        if (endereco.isBlank()) return Optional.empty();
+        if (endereco.isBlank() || numero == null || numero.isBlank()
+                || "S/N".equalsIgnoreCase(numero.trim())) {
+            log.info("[Geocoding] Busca precisa ignorada: logradouro ou número confirmado insuficiente");
+            return Optional.empty();
+        }
 
         if (geoapifyApiKey != null && !geoapifyApiKey.isBlank()) {
             Optional<Coordenadas> geoapify = tentarGeoapify(endereco, numero);
@@ -104,6 +110,7 @@ public class GeocodingService {
                     .build();
 
             log.info("[Geocoding] Iniciando chamada ao Geoapify");
+            aguardarIntervaloGeoapify();
             HttpResponse<String> response = httpClient.send(
                     request,
                     HttpResponse.BodyHandlers.ofString()
@@ -162,6 +169,7 @@ public class GeocodingService {
             }
         } catch (Exception e) {
             // Não registrar a mensagem: exceções HTTP podem incluir a URI com a chave.
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             log.warn("[Geocoding] Falha ao consultar ou interpretar a resposta do Geoapify ({})",
                     e.getClass().getSimpleName());
         }
@@ -207,12 +215,14 @@ public class GeocodingService {
 
                 Optional<Coordenadas> coordenadas = lerCoordenadas(result);
                 if (coordenadas.isPresent()) {
-                    log.info("Endereço localizado pelo Nominatim: {}", result.path("display_name").asText());
+                    log.info("[Geocoding] Resultado do Nominatim aceito após validação do número e das coordenadas");
                     return coordenadas;
                 }
             }
         } catch (Exception e) {
-            log.warn("Falha ao consultar Nominatim por endereço: {}", e.getMessage());
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+            log.warn("[Geocoding] Falha ao consultar Nominatim por endereço ({})",
+                    e.getClass().getSimpleName());
         }
 
         return Optional.empty();
@@ -319,5 +329,16 @@ public class GeocodingService {
 
     private String normalizarNumero(String numero) {
         return numero == null ? "" : numero.trim().replaceAll("\\s+", "").toLowerCase();
+    }
+
+    private synchronized void aguardarIntervaloGeoapify() throws InterruptedException {
+        long agora = System.nanoTime();
+        long espera = proximaChamadaGeoapifyNanos - agora;
+        if (espera > 0) {
+            long milissegundos = espera / 1_000_000;
+            int nanos = (int) (espera % 1_000_000);
+            Thread.sleep(milissegundos, nanos);
+        }
+        proximaChamadaGeoapifyNanos = System.nanoTime() + Duration.ofSeconds(1).toNanos();
     }
 }

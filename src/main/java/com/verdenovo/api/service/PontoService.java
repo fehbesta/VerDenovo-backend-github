@@ -12,7 +12,17 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
 public class PontoService {
@@ -33,6 +43,11 @@ public class PontoService {
 
     @Autowired
     private GeocodingService geocodingService;
+
+    private final AtomicBoolean reprocessamentoEmAndamento = new AtomicBoolean(false);
+    private final AtomicInteger reprocessamentoProcessados = new AtomicInteger();
+    private final AtomicInteger reprocessamentoAtualizados = new AtomicInteger();
+    private volatile String estadoReprocessamento = "IDLE";
 
     public Ponto loginPonto(String email, String senha) {
         Ponto ponto = pontoRepository.findByEmailAndStatusPonto(email, "ATIVO")
@@ -73,7 +88,7 @@ public class PontoService {
         ponto.setDescricao(pontoAtualizado.getDescricao());
 
         if (enderecoMudou) {
-            geocodificarEAtribuir(ponto);
+            geocodificarPrecisamenteEAtribuir(ponto);
         }
 
         return pontoRepository.save(ponto);
@@ -101,7 +116,7 @@ public class PontoService {
             ponto.setCategoriaId(obterCategoriaPadraoId());
         }
 
-        geocodificarEAtribuir(ponto);
+        geocodificarPrecisamenteEAtribuir(ponto);
 
         return pontoRepository.save(ponto);
     }
@@ -118,18 +133,93 @@ public class PontoService {
         return pontoRepository.save(ponto);
     }
 
+    public boolean iniciarRegeocodificacaoEmLote() {
+        if (!reprocessamentoEmAndamento.compareAndSet(false, true)) return false;
+        reprocessamentoProcessados.set(0);
+        reprocessamentoAtualizados.set(0);
+        estadoReprocessamento = "RUNNING";
+        CompletableFuture.runAsync(this::regeocodificarTodosPontos);
+        return true;
+    }
+
+    public Map<String, Object> obterStatusRegeocodificacaoEmLote() {
+        return Map.of(
+                "estado", estadoReprocessamento,
+                "emAndamento", reprocessamentoEmAndamento.get(),
+                "processados", reprocessamentoProcessados.get(),
+                "atualizados", reprocessamentoAtualizados.get()
+        );
+    }
+
+    private void regeocodificarTodosPontos() {
+        try {
+            List<Ponto> pontos = pontoRepository.findAll();
+            Map<String, GeocodingService.Coordenadas> coordenadasPorEndereco = new HashMap<>();
+            Set<String> enderecosConsultados = new HashSet<>();
+            List<Ponto> paraSalvar = new ArrayList<>();
+
+            for (Ponto ponto : pontos) {
+                String chaveEndereco = chaveEndereco(ponto);
+                if (chaveEndereco.isBlank()) {
+                    log.info("[Geocoding] Ponto id={} ignorado no lote: endereço insuficiente", ponto.getId());
+                    reprocessamentoProcessados.incrementAndGet();
+                    continue;
+                }
+
+                GeocodingService.Coordenadas coordenadas = coordenadasPorEndereco.get(chaveEndereco);
+                if (enderecosConsultados.add(chaveEndereco)) {
+                    coordenadas = geocodingService.geocodificarPrecisamente(
+                                    ponto.getLogradouro(), ponto.getNumero(), ponto.getCep())
+                            .orElse(null);
+                    if (coordenadas != null) coordenadasPorEndereco.put(chaveEndereco, coordenadas);
+                } else if (coordenadas == null) {
+                    log.info("[Geocoding] Ponto id={} mantido: endereço repetido já consultado sem resultado preciso",
+                            ponto.getId());
+                }
+
+                if (coordenadas != null) {
+                    ponto.setLatitude(coordenadas.latitude());
+                    ponto.setLongitude(coordenadas.longitude());
+                    paraSalvar.add(ponto);
+                    reprocessamentoAtualizados.incrementAndGet();
+                    log.info("[Geocoding] Ponto id={} atualizado no reprocessamento em lote", ponto.getId());
+                } else {
+                    log.info("[Geocoding] Ponto id={} mantido: nenhum resultado preciso validado", ponto.getId());
+                }
+                reprocessamentoProcessados.incrementAndGet();
+            }
+
+            pontoRepository.saveAll(paraSalvar);
+            estadoReprocessamento = "COMPLETED";
+        } catch (Exception e) {
+            estadoReprocessamento = "FAILED";
+            log.error("[Geocoding] Reprocessamento em lote falhou ({})", e.getClass().getSimpleName());
+        } finally {
+            reprocessamentoEmAndamento.set(false);
+        }
+    }
+
+    private String chaveEndereco(Ponto ponto) {
+        String logradouro = ponto.getLogradouro() == null ? "" : ponto.getLogradouro();
+        String numero = ponto.getNumero() == null ? "" : ponto.getNumero();
+        String cep = ponto.getCep() == null ? "" : ponto.getCep();
+        return (logradouro + "|" + numero + "|" + cep)
+                .trim().toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{N}]", "");
+    }
+
     /**
      * Tenta encontrar as coordenadas do endereço informado e preenche latitude/longitude
      * do Ponto. Se a geocodificação falhar (sem internet, endereço não encontrado etc.),
      * o cadastro continua normalmente sem coordenadas — o ponto só não terá pin no mapa
      * do app mobile até ser corrigido.
      */
-    private void geocodificarEAtribuir(Ponto ponto) {
-        geocodingService.geocodificar(ponto.getLogradouro(), ponto.getNumero(), ponto.getCep())
+    private void geocodificarPrecisamenteEAtribuir(Ponto ponto) {
+        geocodingService.geocodificarPrecisamente(ponto.getLogradouro(), ponto.getNumero(), ponto.getCep())
                 .ifPresentOrElse(coords -> {
                     ponto.setLatitude(coords.latitude());
                     ponto.setLongitude(coords.longitude());
-                }, () -> log.info("Não foi possível geocodificar o endereço do ponto '{}'", ponto.getNome()));
+                }, () -> log.info("[Geocoding] Nenhum resultado preciso validado para gravação do ponto id={}",
+                        ponto.getId() == null ? "novo" : ponto.getId()));
     }
 
     /**

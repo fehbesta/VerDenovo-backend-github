@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/pontos")
@@ -59,6 +60,21 @@ public class PontoController {
     @PostMapping("/{id}/regeocodificar")
     public ResponseEntity<Ponto> regeocodificarPonto(@PathVariable Long id) {
         return ResponseEntity.ok(pontoService.regeocodificarPonto(id));
+    }
+
+    @PostMapping("/regeocodificar/lote")
+    public ResponseEntity<Map<String, Object>> iniciarRegeocodificacaoEmLote() {
+        boolean iniciado = pontoService.iniciarRegeocodificacaoEmLote();
+        Map<String, Object> resposta = Map.of(
+                "iniciado", iniciado,
+                "status", pontoService.obterStatusRegeocodificacaoEmLote()
+        );
+        return ResponseEntity.status(iniciado ? 202 : 409).body(resposta);
+    }
+
+    @GetMapping("/regeocodificar/lote/status")
+    public ResponseEntity<Map<String, Object>> statusRegeocodificacaoEmLote() {
+        return ResponseEntity.ok(pontoService.obterStatusRegeocodificacaoEmLote());
     }
 
     @GetMapping("/pendentes")
