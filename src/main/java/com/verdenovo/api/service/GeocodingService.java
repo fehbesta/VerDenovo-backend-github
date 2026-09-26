@@ -152,7 +152,7 @@ public class GeocodingService {
                     continue;
                 }
 
-                Optional<Coordenadas> coordenadas = lerCoordenadas(result.path("properties"));
+                Optional<Coordenadas> coordenadas = lerCoordenadas(result);
                 if (coordenadas.isPresent()) {
                     log.info("[Geocoding] Resultado {} aceito: passou a validação do número e as coordenadas são válidas",
                             indice);
