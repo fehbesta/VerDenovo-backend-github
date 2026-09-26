@@ -25,7 +25,7 @@ public class GeocodingService {
     private static final String BRASILAPI_CEP_URL = "https://brasilapi.com.br/api/cep/v2/";
     // Limites conservadores configurados pelo produto; a Geoapify sugere 0.95/0.2 como exemplo,
     // mas documenta que confiança baixa não prova erro e que os limites dependem da precisão exigida.
-    private static final double CONFIANCA_MINIMA_ENDERECO = 0.80;
+    private static final double CONFIANCA_MINIMA_ENDERECO = 0.70;
     private static final double CONFIANCA_MINIMA_IMOVEL = 0.95;
 
     @Value("${GEOAPIFY_API_KEY:}")
