@@ -95,6 +95,14 @@ public class PontoService {
     }
 
     public Ponto criarPonto(Ponto ponto, String emailLogado) {
+        boolean coordenadasRecebidasDoFormulario = ponto.getLatitude() != null
+                && ponto.getLongitude() != null;
+        log.info("[Geocoding] Cadastro recebido: ruaInformada={}, numeroInformado={}, cepInformado={}, coordenadasFormulario={}",
+                ponto.getLogradouro() != null && !ponto.getLogradouro().isBlank(),
+                ponto.getNumero() != null && !ponto.getNumero().isBlank(),
+                ponto.getCep() != null && !ponto.getCep().isBlank(),
+                coordenadasRecebidasDoFormulario);
+
         if (emailLogado != null) {
             usuarioRepository.findByEmail(emailLogado).ifPresent(u -> {
                 if ("ADMIN".equals(u.getNivelAcesso())) {
@@ -116,9 +124,17 @@ public class PontoService {
             ponto.setCategoriaId(obterCategoriaPadraoId());
         }
 
-        geocodificarPrecisamenteEAtribuir(ponto);
-
-        return pontoRepository.save(ponto);
+        log.info("[Geocoding] Cadastro chamando geocodificarPrecisamente");
+        boolean coordenadasGeocodificadas = geocodificarPrecisamenteEAtribuir(ponto);
+        Ponto salvo = pontoRepository.save(ponto);
+        Ponto persistido = pontoRepository.findById(salvo.getId()).orElse(salvo);
+        boolean coordenadasPersistidasCorrespondem = Objects.equals(ponto.getLatitude(), persistido.getLatitude())
+                && Objects.equals(ponto.getLongitude(), persistido.getLongitude());
+        log.info("[Geocoding] Cadastro persistido: id={}, geocodificado={}, formularioTinhaCoordenadas={}, bancoTemCoordenadas={}, persistenciaConfere={}",
+                salvo.getId(), coordenadasGeocodificadas, coordenadasRecebidasDoFormulario,
+                persistido.getLatitude() != null && persistido.getLongitude() != null,
+                coordenadasPersistidasCorrespondem);
+        return persistido;
     }
 
     public Ponto regeocodificarPonto(Long id) {
@@ -213,13 +229,18 @@ public class PontoService {
      * o cadastro continua normalmente sem coordenadas — o ponto só não terá pin no mapa
      * do app mobile até ser corrigido.
      */
-    private void geocodificarPrecisamenteEAtribuir(Ponto ponto) {
-        geocodingService.geocodificarPrecisamente(ponto.getLogradouro(), ponto.getNumero(), ponto.getCep())
-                .ifPresentOrElse(coords -> {
+    private boolean geocodificarPrecisamenteEAtribuir(Ponto ponto) {
+        return geocodingService.geocodificarPrecisamente(ponto.getLogradouro(), ponto.getNumero(), ponto.getCep())
+                .map(coords -> {
                     ponto.setLatitude(coords.latitude());
                     ponto.setLongitude(coords.longitude());
-                }, () -> log.info("[Geocoding] Nenhum resultado preciso validado para gravação do ponto id={}",
-                        ponto.getId() == null ? "novo" : ponto.getId()));
+                    log.info("[Geocoding] Coordenadas geocodificadas atribuídas ao objeto antes de salvar");
+                    return true;
+                })
+                .orElseGet(() -> {
+                    log.info("[Geocoding] Nenhum resultado preciso validado; coordenadas recebidas mantidas");
+                    return false;
+                });
     }
 
     /**

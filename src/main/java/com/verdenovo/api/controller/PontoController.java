@@ -39,14 +39,15 @@ public class PontoController {
     }
 
     @PostMapping
-    public ResponseEntity<MessageResponse> criarPonto(@RequestBody Ponto ponto,
+    public ResponseEntity<PontoCriacaoResponse> criarPonto(@RequestBody Ponto ponto,
             org.springframework.security.core.Authentication authentication) {
         String emailLogado = authentication != null ? authentication.getName() : null;
         Ponto salvo = pontoService.criarPonto(ponto, emailLogado);
         boolean isAtivo = "ATIVO".equals(salvo.getStatusPonto());
-        return ResponseEntity.ok(new MessageResponse(
-            isAtivo ? "Ponto cadastrado e ativado com sucesso!" : "Ponto cadastrado com sucesso! Aguardando aprovação do administrador."
-        ));
+        return ResponseEntity.ok(new PontoCriacaoResponse(
+                isAtivo ? "Ponto cadastrado e ativado com sucesso!"
+                        : "Ponto cadastrado com sucesso! Aguardando aprovação do administrador.",
+                salvo.getId(), salvo.getLatitude(), salvo.getLongitude()));
     }
 
     @PutMapping("/{id}")
