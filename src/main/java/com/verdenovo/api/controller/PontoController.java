@@ -70,7 +70,7 @@ public class PontoController {
                 "iniciado", iniciado,
                 "status", pontoService.obterStatusRegeocodificacaoEmLote()
         );
-        return ResponseEntity.status(iniciado ? 202 : 409).body(resposta);
+        return ResponseEntity.accepted().body(resposta);
     }
 
     @GetMapping("/regeocodificar/lote/status")

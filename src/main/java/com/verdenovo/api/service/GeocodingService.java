@@ -23,7 +23,8 @@ public class GeocodingService {
     private static final String NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
     private static final String GEOAPIFY_URL = "https://api.geoapify.com/v1/geocode/search";
     private static final String BRASILAPI_CEP_URL = "https://brasilapi.com.br/api/cep/v2/";
-    // Geoapify's validation guidance uses 0.95 as an acceptance threshold; lower scores need review.
+    // Limites conservadores configurados pelo produto; a Geoapify sugere 0.95/0.2 como exemplo,
+    // mas documenta que confiança baixa não prova erro e que os limites dependem da precisão exigida.
     private static final double CONFIANCA_MINIMA_ENDERECO = 0.95;
     private static final double CONFIANCA_MINIMA_IMOVEL = 0.95;
 
@@ -171,6 +172,16 @@ public class GeocodingService {
                     continue;
                 }
 
+                Optional<Coordenadas> coordenadas = lerCoordenadas(result);
+                if (coordenadas.isEmpty()) {
+                    log.info("[Geocoding] operacao={} pontoId={} resultado={} rejeitado: coordenadas ausentes ou inválidas",
+                            operacao, pontoId, indice);
+                    continue;
+                }
+                Coordenadas coords = coordenadas.get();
+                log.info("[Geocoding] operacao={} pontoId={} resultado={} candidato lat={} lon={} confiança={} confiançaImovel={}",
+                        operacao, pontoId, indice, coords.latitude(), coords.longitude(), confianca, confiancaEdificio);
+
                 if (confianca < CONFIANCA_MINIMA_ENDERECO
                         || confiancaEdificio < CONFIANCA_MINIMA_IMOVEL) {
                     log.info("[Geocoding] operacao={} pontoId={} resultado={} rejeitado: confiança abaixo dos mínimos {} e {}",
@@ -179,15 +190,9 @@ public class GeocodingService {
                     continue;
                 }
 
-                Optional<Coordenadas> coordenadas = lerCoordenadas(result);
-                if (coordenadas.isPresent()) {
-                    Coordenadas coords = coordenadas.get();
-                    log.info("[Geocoding] operacao={} pontoId={} resultado={} aceito lat={} lon={}",
-                            operacao, pontoId, indice, coords.latitude(), coords.longitude());
-                    return coordenadas;
-                }
-                log.info("[Geocoding] operacao={} pontoId={} resultado={} rejeitado: coordenadas ausentes ou inválidas",
-                        operacao, pontoId, indice);
+                log.info("[Geocoding] operacao={} pontoId={} resultado={} aceito lat={} lon={}",
+                        operacao, pontoId, indice, coords.latitude(), coords.longitude());
+                return coordenadas;
             }
         } catch (Exception e) {
             // Não registrar a mensagem: exceções HTTP podem incluir a URI com a chave.

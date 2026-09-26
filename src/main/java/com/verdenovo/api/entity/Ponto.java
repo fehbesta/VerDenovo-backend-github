@@ -66,6 +66,18 @@ public class Ponto {
     @Column
     private Double longitude;
 
+    @Column(name = "geocodificacao_status", length = 20)
+    private String geocodificacaoStatus;
+
+    @Column(name = "geocodificacao_endereco_hash", length = 64)
+    private String geocodificacaoEnderecoHash;
+
+    @Column(name = "geocodificacao_tentativa_apos")
+    private LocalDateTime geocodificacaoTentativaApos;
+
+    @Column(name = "geocodificacao_execucao_id", length = 36)
+    private String geocodificacaoExecucaoId;
+
     // Getters e Setters
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
@@ -123,4 +135,16 @@ public class Ponto {
 
     public Double getLongitude() { return longitude; }
     public void setLongitude(Double longitude) { this.longitude = longitude; }
+
+    public String getGeocodificacaoStatus() { return geocodificacaoStatus; }
+    public void setGeocodificacaoStatus(String geocodificacaoStatus) { this.geocodificacaoStatus = geocodificacaoStatus; }
+
+    public String getGeocodificacaoEnderecoHash() { return geocodificacaoEnderecoHash; }
+    public void setGeocodificacaoEnderecoHash(String geocodificacaoEnderecoHash) { this.geocodificacaoEnderecoHash = geocodificacaoEnderecoHash; }
+
+    public LocalDateTime getGeocodificacaoTentativaApos() { return geocodificacaoTentativaApos; }
+    public void setGeocodificacaoTentativaApos(LocalDateTime geocodificacaoTentativaApos) { this.geocodificacaoTentativaApos = geocodificacaoTentativaApos; }
+
+    public String getGeocodificacaoExecucaoId() { return geocodificacaoExecucaoId; }
+    public void setGeocodificacaoExecucaoId(String geocodificacaoExecucaoId) { this.geocodificacaoExecucaoId = geocodificacaoExecucaoId; }
 }

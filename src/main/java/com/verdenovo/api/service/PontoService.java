@@ -5,24 +5,24 @@ import com.verdenovo.api.entity.Ponto;
 import com.verdenovo.api.repository.CategoriaRepository;
 import com.verdenovo.api.repository.PontoRepository;
 import com.verdenovo.api.repository.UsuarioRepository;
+import com.verdenovo.api.config.AddressChangeTriggerInitializer;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.scheduling.annotation.Scheduled;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -31,6 +31,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class PontoService {
 
     private static final Logger log = LoggerFactory.getLogger(PontoService.class);
+    private static final String STATUS_PENDENTE = "PENDENTE";
+    private static final String STATUS_PROCESSANDO = "PROCESSANDO";
+    private static final String STATUS_SUCESSO = "SUCESSO";
+    private static final String STATUS_FALHA = "FALHA";
+    private static final long LEASE_PROCESSAMENTO_MINUTOS = 2;
 
     @Autowired
     private PontoRepository pontoRepository;
@@ -47,8 +52,14 @@ public class PontoService {
     @Autowired
     private GeocodingService geocodingService;
 
+    @Autowired
+    private AddressChangeTriggerInitializer addressChangeTriggerInitializer;
+
     @PersistenceContext
     private EntityManager entityManager;
+
+    @Value("${geocoding.retry-days:7}")
+    private long intervaloNovaTentativaDias;
 
     private final AtomicBoolean reprocessamentoEmAndamento = new AtomicBoolean(false);
     private final AtomicInteger reprocessamentoProcessados = new AtomicInteger();
@@ -94,7 +105,10 @@ public class PontoService {
         ponto.setDescricao(pontoAtualizado.getDescricao());
 
         if (enderecoMudou) {
-            geocodificarPrecisamenteEAtribuir(ponto, "edit");
+            marcarGeocodificacaoPendente(ponto);
+            pontoRepository.saveAndFlush(ponto);
+            processarPontoPendente(ponto.getId(), "edicao");
+            return pontoRepository.findById(ponto.getId()).orElse(ponto);
         }
 
         return pontoRepository.save(ponto);
@@ -131,39 +145,29 @@ public class PontoService {
             ponto.setCategoriaId(obterCategoriaPadraoId());
         }
 
+        marcarGeocodificacaoPendente(ponto);
         Ponto salvo = pontoRepository.saveAndFlush(ponto);
-        log.info("[Geocoding] operacao=cadastro pontoId={} chamando geocodificarPrecisamente",
-                salvo.getId());
-        boolean coordenadasGeocodificadas = geocodificarPrecisamenteEAtribuir(ponto, "cadastro");
-        Ponto persistido = pontoRepository.saveAndFlush(ponto);
+        log.info("[Geocoding] operacao=cadastro pontoId={} marcado como pendente; formularioTinhaCoordenadas={}",
+                salvo.getId(), coordenadasRecebidasDoFormulario);
+        processarPontoPendente(salvo.getId(), "cadastro");
+        Ponto persistido = pontoRepository.findById(salvo.getId()).orElse(salvo);
         entityManager.refresh(persistido);
-        boolean coordenadasPersistidasCorrespondem = Objects.equals(ponto.getLatitude(), persistido.getLatitude())
-                && Objects.equals(ponto.getLongitude(), persistido.getLongitude());
-        log.info("[Geocoding] operacao=cadastro pontoId={} geocodificado={} formularioTinhaCoordenadas={} latBanco={} lonBanco={} persistenciaConfere={}",
-                salvo.getId(), coordenadasGeocodificadas, coordenadasRecebidasDoFormulario,
-                persistido.getLatitude(), persistido.getLongitude(), coordenadasPersistidasCorrespondem);
         return persistido;
     }
 
-    @Transactional
     public Ponto regeocodificarPonto(Long id) {
         Ponto ponto = pontoRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Ponto não encontrado."));
-        log.info("[Geocoding] operacao=correcao_manual pontoId={} chamada iniciada", id);
-        GeocodingService.Coordenadas coordenadas = geocodingService
-                .geocodificarPrecisamente(ponto.getLogradouro(), ponto.getNumero(), ponto.getCep(),
-                        "correcao_manual", id)
-                .orElseThrow(() -> new RuntimeException(
-                        "Não foi possível localizar o endereço. Confira rua, número e CEP."));
-        ponto.setLatitude(coordenadas.latitude());
-        ponto.setLongitude(coordenadas.longitude());
-        log.info("[Geocoding] operacao=correcao_manual pontoId={} coordenadas aplicadas lat={} lon={}",
-                id, coordenadas.latitude(), coordenadas.longitude());
-        Ponto salvo = pontoRepository.saveAndFlush(ponto);
-        entityManager.refresh(salvo);
-        log.info("[Geocoding] operacao=correcao_manual pontoId={} coordenadas lidas do banco lat={} lon={}",
-                id, salvo.getLatitude(), salvo.getLongitude());
-        return salvo;
+        String execucaoId = java.util.UUID.randomUUID().toString();
+        if (pontoRepository.reivindicarGeocodificacaoManual(id, leaseProcessamentoAte(), execucaoId) == 0) {
+            throw new RuntimeException("A localização deste ponto já está sendo processada.");
+        }
+        processarPontoReivindicado(id, "correcao_manual", execucaoId);
+        Ponto atualizado = pontoRepository.findById(id).orElse(ponto);
+        if (!STATUS_SUCESSO.equals(atualizado.getGeocodificacaoStatus())) {
+            throw new RuntimeException("Não foi possível localizar o endereço com confiança suficiente.");
+        }
+        return atualizado;
     }
 
     public boolean iniciarRegeocodificacaoEmLote() {
@@ -171,96 +175,197 @@ public class PontoService {
         reprocessamentoProcessados.set(0);
         reprocessamentoAtualizados.set(0);
         estadoReprocessamento = "RUNNING";
-        CompletableFuture.runAsync(this::regeocodificarTodosPontos);
+        CompletableFuture.runAsync(() -> {
+            try {
+                processarFilaGeocodificacao();
+                estadoReprocessamento = "COMPLETED";
+            } catch (Exception e) {
+                estadoReprocessamento = "FAILED";
+                log.error("[Geocoding] Worker da fila falhou ({})", e.getClass().getSimpleName());
+            } finally {
+                reprocessamentoEmAndamento.set(false);
+            }
+        });
         return true;
     }
 
-    public Map<String, Object> obterStatusRegeocodificacaoEmLote() {
-        return Map.of(
-                "estado", estadoReprocessamento,
-                "emAndamento", reprocessamentoEmAndamento.get(),
-                "processados", reprocessamentoProcessados.get(),
-                "atualizados", reprocessamentoAtualizados.get()
-        );
+    @Scheduled(
+            fixedDelayString = "${geocoding.scan-interval-ms:30000}",
+            initialDelayString = "${geocoding.scan-initial-delay-ms:15000}"
+    )
+    public void agendarProcessamentoDePendencias() {
+        iniciarRegeocodificacaoEmLote();
     }
 
-    private void regeocodificarTodosPontos() {
-        try {
-            List<Ponto> pontos = pontoRepository.findAll();
-            Map<String, GeocodingService.Coordenadas> coordenadasPorEndereco = new HashMap<>();
-            Set<String> enderecosConsultados = new HashSet<>();
-            List<Ponto> paraSalvar = new ArrayList<>();
-
-            for (Ponto ponto : pontos) {
-                String chaveEndereco = chaveEndereco(ponto);
-                if (chaveEndereco.isBlank()) {
-                    log.info("[Geocoding] Ponto id={} ignorado no lote: endereço insuficiente", ponto.getId());
-                    reprocessamentoProcessados.incrementAndGet();
-                    continue;
-                }
-
-                GeocodingService.Coordenadas coordenadas = coordenadasPorEndereco.get(chaveEndereco);
-                if (enderecosConsultados.add(chaveEndereco)) {
-                    coordenadas = geocodingService.geocodificarPrecisamente(
-                                    ponto.getLogradouro(), ponto.getNumero(), ponto.getCep(), "lote", ponto.getId())
-                            .orElse(null);
-                    if (coordenadas != null) coordenadasPorEndereco.put(chaveEndereco, coordenadas);
-                } else if (coordenadas == null) {
-                    log.info("[Geocoding] Ponto id={} mantido: endereço repetido já consultado sem resultado preciso",
-                            ponto.getId());
-                }
-
-                if (coordenadas != null) {
-                    ponto.setLatitude(coordenadas.latitude());
-                    ponto.setLongitude(coordenadas.longitude());
-                    paraSalvar.add(ponto);
-                    reprocessamentoAtualizados.incrementAndGet();
-                    log.info("[Geocoding] Ponto id={} atualizado no reprocessamento em lote", ponto.getId());
-                } else {
-                    log.info("[Geocoding] Ponto id={} mantido: nenhum resultado preciso validado", ponto.getId());
-                }
-                reprocessamentoProcessados.incrementAndGet();
-            }
-
-            pontoRepository.saveAll(paraSalvar);
-            estadoReprocessamento = "COMPLETED";
-        } catch (Exception e) {
-            estadoReprocessamento = "FAILED";
-            log.error("[Geocoding] Reprocessamento em lote falhou ({})", e.getClass().getSimpleName());
-        } finally {
-            reprocessamentoEmAndamento.set(false);
+    @Scheduled(
+            fixedDelayString = "${geocoding.fallback-scan-interval-ms:300000}",
+            initialDelayString = "${geocoding.fallback-scan-initial-delay-ms:30000}"
+    )
+    public void agendarReconciliaçãoFallback() {
+        if (!addressChangeTriggerInitializer.isInstalled() && addressChangeTriggerInitializer.isFallbackEnabled()) {
+            reconciliarAlteracoesExternasPorHash();
         }
     }
 
-    private String chaveEndereco(Ponto ponto) {
-        String logradouro = ponto.getLogradouro() == null ? "" : ponto.getLogradouro();
-        String numero = ponto.getNumero() == null ? "" : ponto.getNumero();
-        String cep = ponto.getCep() == null ? "" : ponto.getCep();
-        return (logradouro + "|" + numero + "|" + cep)
-                .trim().toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{N}]", "");
+    /** Fallback quando o login SQL não pode instalar triggers: identifica somente hashes alterados. */
+    private void reconciliarAlteracoesExternasPorHash() {
+        long ultimoId = 0;
+        int alterados = 0;
+        List<PontoRepository.EstadoEnderecoGeocodificacao> pagina;
+        do {
+            pagina = pontoRepository.findTop500ByIdGreaterThanOrderByIdAsc(ultimoId);
+            for (PontoRepository.EstadoEnderecoGeocodificacao estado : pagina) {
+                ultimoId = estado.getId();
+                String hashAtual = hashEndereco(estado.getLogradouro(), estado.getNumero(), estado.getCep());
+                if (!Objects.equals(hashAtual, estado.getGeocodificacaoEnderecoHash())) {
+                    Ponto ponto = pontoRepository.findById(estado.getId()).orElse(null);
+                    if (ponto != null && !Objects.equals(hashAtual,
+                            hashEndereco(ponto.getLogradouro(), ponto.getNumero(), ponto.getCep()))) {
+                        marcarGeocodificacaoPendente(ponto);
+                        pontoRepository.save(ponto);
+                        alterados++;
+                    }
+                }
+            }
+        } while (pagina.size() == 500);
+        if (alterados > 0) {
+            log.info("[Geocoding] Fallback por hash detectou {} endereço(s) novo(s) ou alterado(s)", alterados);
+        }
     }
 
-    /**
-     * Tenta encontrar as coordenadas do endereço informado e preenche latitude/longitude
-     * do Ponto. Se a geocodificação falhar (sem internet, endereço não encontrado etc.),
-     * o cadastro continua normalmente sem coordenadas — o ponto só não terá pin no mapa
-     * do app mobile até ser corrigido.
-     */
-    private boolean geocodificarPrecisamenteEAtribuir(Ponto ponto, String operacao) {
-        return geocodingService.geocodificarPrecisamente(
-                        ponto.getLogradouro(), ponto.getNumero(), ponto.getCep(), operacao, ponto.getId())
-                .map(coords -> {
-                    ponto.setLatitude(coords.latitude());
-                    ponto.setLongitude(coords.longitude());
-                    log.info("[Geocoding] operacao={} pontoId={} coordenadas aplicadas antes de salvar lat={} lon={}",
-                            operacao, ponto.getId(), coords.latitude(), coords.longitude());
-                    return true;
-                })
-                .orElseGet(() -> {
-                    log.info("[Geocoding] operacao={} pontoId={} nenhum resultado preciso; coordenadas existentes mantidas",
-                            operacao, ponto.getId());
-                    return false;
-                });
+    public Map<String, Object> obterStatusRegeocodificacaoEmLote() {
+        long pendentes = pontoRepository.countByGeocodificacaoStatus(STATUS_PENDENTE);
+        long processando = pontoRepository.countByGeocodificacaoStatus(STATUS_PROCESSANDO);
+        long falhas = pontoRepository.countByGeocodificacaoStatus(STATUS_FALHA);
+        boolean falhaElegivel = !pontoRepository
+                .findByGeocodificacaoStatusAndGeocodificacaoTentativaAposLessThanEqualOrderByIdAsc(
+                        STATUS_FALHA, LocalDateTime.now()).isEmpty();
+        return Map.of(
+                "estado", estadoReprocessamento,
+                "emAndamento", reprocessamentoEmAndamento.get() || pendentes > 0 || processando > 0 || falhaElegivel,
+                "processados", reprocessamentoProcessados.get(),
+                "atualizados", reprocessamentoAtualizados.get(),
+                "pendentes", pendentes,
+                "processando", processando,
+                "falhas", falhas
+        );
+    }
+
+    private void processarFilaGeocodificacao() {
+        while (!Thread.currentThread().isInterrupted()) {
+            LocalDateTime agora = LocalDateTime.now();
+            pontoRepository.reenfileirarReivindicacoesExpiradas(agora);
+            List<Ponto> candidatos = new ArrayList<>(
+                    pontoRepository.findByGeocodificacaoStatusOrderByIdAsc(STATUS_PENDENTE));
+            candidatos.addAll(pontoRepository
+                    .findByGeocodificacaoStatusAndGeocodificacaoTentativaAposLessThanEqualOrderByIdAsc(
+                            STATUS_FALHA, agora));
+            if (candidatos.isEmpty()) return;
+
+            boolean reivindicouAlgum = false;
+            for (Ponto candidato : candidatos) {
+                LocalDateTime tentativaAgora = LocalDateTime.now();
+                String execucaoId = java.util.UUID.randomUUID().toString();
+                if (pontoRepository.reivindicarGeocodificacaoPendente(
+                        candidato.getId(), tentativaAgora, tentativaAgora.plusMinutes(LEASE_PROCESSAMENTO_MINUTOS),
+                        execucaoId) == 0) {
+                    continue;
+                }
+                reivindicouAlgum = true;
+                reprocessamentoProcessados.incrementAndGet();
+                processarPontoReivindicado(candidato.getId(), "fila_automatica", execucaoId);
+            }
+            if (!reivindicouAlgum) return;
+        }
+    }
+
+    private void processarPontoPendente(Long pontoId, String operacao) {
+        LocalDateTime agora = LocalDateTime.now();
+        String execucaoId = java.util.UUID.randomUUID().toString();
+        if (pontoRepository.reivindicarGeocodificacaoPendente(
+                pontoId, agora, agora.plusMinutes(LEASE_PROCESSAMENTO_MINUTOS), execucaoId) != 0) {
+            processarPontoReivindicado(pontoId, operacao, execucaoId);
+        }
+    }
+
+    private void processarPontoReivindicado(Long pontoId, String operacao, String execucaoId) {
+        Ponto ponto = pontoRepository.findById(pontoId).orElse(null);
+        if (ponto == null) return;
+        if (!execucaoId.equals(ponto.getGeocodificacaoExecucaoId())
+                || !STATUS_PROCESSANDO.equals(ponto.getGeocodificacaoStatus())) {
+            log.info("[Geocoding] operacao={} pontoId={} reivindicação substituída antes da consulta", operacao, pontoId);
+            return;
+        }
+
+        String hashTentado = hashEndereco(ponto.getLogradouro(), ponto.getNumero(), ponto.getCep());
+        ponto.setGeocodificacaoEnderecoHash(hashTentado);
+        pontoRepository.saveAndFlush(ponto);
+        log.info("[Geocoding] operacao={} pontoId={} tentativa iniciada", operacao, pontoId);
+
+        GeocodingService.Coordenadas coordenadas;
+        try {
+            coordenadas = geocodingService
+                    .geocodificarPrecisamente(ponto.getLogradouro(), ponto.getNumero(), ponto.getCep(), operacao, pontoId)
+                    .orElse(null);
+        } catch (Exception e) {
+            coordenadas = null;
+            log.warn("[Geocoding] operacao={} pontoId={} falha inesperada ({})",
+                    operacao, pontoId, e.getClass().getSimpleName());
+        }
+
+        Ponto atual = pontoRepository.findById(pontoId).orElse(null);
+        if (atual == null) return;
+        String hashAtual = hashEndereco(atual.getLogradouro(), atual.getNumero(), atual.getCep());
+        boolean aindaEhDonoDaReivindicacao = STATUS_PROCESSANDO.equals(atual.getGeocodificacaoStatus())
+                && execucaoId.equals(atual.getGeocodificacaoExecucaoId());
+        if (!Objects.equals(hashTentado, hashAtual) || !aindaEhDonoDaReivindicacao) {
+            if (aindaEhDonoDaReivindicacao) {
+                atual.setGeocodificacaoStatus(STATUS_PENDENTE);
+                atual.setGeocodificacaoExecucaoId(null);
+                atual.setGeocodificacaoEnderecoHash(hashAtual);
+                atual.setGeocodificacaoTentativaApos(null);
+                pontoRepository.save(atual);
+            }
+            log.info("[Geocoding] operacao={} pontoId={} tentativa obsoleta descartada; pendência preservada",
+                    operacao, pontoId);
+            return;
+        }
+
+        atual.setGeocodificacaoEnderecoHash(hashTentado);
+        if (coordenadas != null) {
+            atual.setLatitude(coordenadas.latitude());
+            atual.setLongitude(coordenadas.longitude());
+            atual.setGeocodificacaoStatus(STATUS_SUCESSO);
+            atual.setGeocodificacaoTentativaApos(null);
+            atual.setGeocodificacaoExecucaoId(null);
+            reprocessamentoAtualizados.incrementAndGet();
+            log.info("[Geocoding] operacao={} pontoId={} resultado=SUCESSO coordenadasAplicadas lat={} lon={}",
+                    operacao, pontoId, coordenadas.latitude(), coordenadas.longitude());
+        } else {
+            atual.setGeocodificacaoStatus(STATUS_FALHA);
+            atual.setGeocodificacaoTentativaApos(LocalDateTime.now().plusDays(intervaloNovaTentativaDias));
+            atual.setGeocodificacaoExecucaoId(null);
+            log.info("[Geocoding] operacao={} pontoId={} resultado=FALHA; coordenadas atuais preservadas; nova tentativa após {}",
+                    operacao, pontoId, atual.getGeocodificacaoTentativaApos());
+        }
+        Ponto salvo = pontoRepository.saveAndFlush(atual);
+        log.info("[Geocoding] operacao={} pontoId={} estadoBanco={} latBanco={} lonBanco={}",
+                operacao, pontoId, salvo.getGeocodificacaoStatus(), salvo.getLatitude(), salvo.getLongitude());
+    }
+
+    private void marcarGeocodificacaoPendente(Ponto ponto) {
+        ponto.setGeocodificacaoEnderecoHash(hashEndereco(ponto.getLogradouro(), ponto.getNumero(), ponto.getCep()));
+        ponto.setGeocodificacaoStatus(STATUS_PENDENTE);
+        ponto.setGeocodificacaoTentativaApos(null);
+        ponto.setGeocodificacaoExecucaoId(null);
+    }
+
+    private LocalDateTime leaseProcessamentoAte() {
+        return LocalDateTime.now().plusMinutes(LEASE_PROCESSAMENTO_MINUTOS);
+    }
+
+    private String hashEndereco(String logradouro, String numero, String cep) {
+        return GeocodingAddressFingerprint.of(logradouro, numero, cep);
     }
 
     /**

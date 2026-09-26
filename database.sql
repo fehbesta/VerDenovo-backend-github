@@ -64,6 +64,10 @@ CREATE TABLE Ponto
 	categoria_id        INT             NULL, -- nullable: a aplicação atribui uma categoria padrão automaticamente
 	latitude            FLOAT           NULL, -- preenchido automaticamente via geocodificação do endereço
 	longitude           FLOAT           NULL,
+	geocodificacao_status VARCHAR(20)    NULL,
+	geocodificacao_endereco_hash CHAR(64) NULL,
+	geocodificacao_tentativa_apos DATETIME2 NULL,
+	geocodificacao_execucao_id VARCHAR(36) NULL,
 
 	PRIMARY KEY (id),
 	FOREIGN KEY (categoria_id) REFERENCES Categoria (id),

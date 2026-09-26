@@ -116,6 +116,63 @@ IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'Pont
     ALTER TABLE Ponto ADD longitude FLOAT NULL;
 GO
 
+-- Fila persistente: o estado evita repetir tentativas recusadas até a data de retry.
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'Ponto' AND COLUMN_NAME = 'geocodificacao_status')
+    ALTER TABLE Ponto ADD geocodificacao_status VARCHAR(20) NULL;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'Ponto' AND COLUMN_NAME = 'geocodificacao_endereco_hash')
+    ALTER TABLE Ponto ADD geocodificacao_endereco_hash CHAR(64) NULL;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'Ponto' AND COLUMN_NAME = 'geocodificacao_tentativa_apos')
+    ALTER TABLE Ponto ADD geocodificacao_tentativa_apos DATETIME2 NULL;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'Ponto' AND COLUMN_NAME = 'geocodificacao_execucao_id')
+    ALTER TABLE Ponto ADD geocodificacao_execucao_id VARCHAR(36) NULL;
+GO
+
+-- Marca somente inserções e mudanças de logradouro/número/CEP, inclusive as
+-- feitas por versões antigas do site que escrevem diretamente na mesma tabela.
+-- Identidade usada: dbo.Ponto (entidade @Table(name="Ponto")); as colunas
+-- logradouro, numero, cep e id são snake_case por convenção física Hibernate.
+-- CREATE OR ALTER torna a definição repetível. A conta que executar a migração
+-- precisa de CREATE TRIGGER no banco VerdNovo e ALTER na tabela dbo.Ponto.
+-- Para verificar após executar, rode a consulta mostrada no comentário abaixo.
+CREATE OR ALTER TRIGGER dbo.trg_ponto_geocodificacao_endereco
+ON dbo.Ponto
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    UPDATE p
+    SET geocodificacao_status = 'PENDENTE',
+        geocodificacao_tentativa_apos = NULL,
+        geocodificacao_execucao_id = NULL
+    FROM dbo.Ponto p
+    INNER JOIN inserted i ON i.id = p.id
+    LEFT JOIN deleted d ON d.id = i.id
+    WHERE d.id IS NULL
+       OR ISNULL(i.logradouro, '') <> ISNULL(d.logradouro, '')
+       OR ISNULL(i.numero, '') <> ISNULL(d.numero, '')
+       OR ISNULL(i.cep, '') <> ISNULL(d.cep, '');
+END
+GO
+
+-- Verificação (deve retornar 1 linha com parent_table = Ponto):
+-- SELECT tr.name, OBJECT_SCHEMA_NAME(tr.parent_id) AS parent_schema,
+--        OBJECT_NAME(tr.parent_id) AS parent_table, tr.is_disabled
+-- FROM sys.triggers tr
+-- WHERE tr.name = N'trg_ponto_geocodificacao_endereco'
+--   AND tr.parent_id = OBJECT_ID(N'dbo.Ponto');
+-- Sem permissão para criar trigger, o backend não aborta: configure
+-- GEOCODING_TRIGGER_INSTALL_ENABLED=false (ou deixe a instalação falhar).
+-- Nesse modo ele compara hashes a cada cinco minutos (configurável); lê só
+-- id/logradouro/numero/cep/hash em páginas de 500 e requer SELECT/UPDATE em
+-- dbo.Ponto. Escritas externas após o baseline inicial são detectadas.
+
 -- Garante que existe ao menos uma categoria "Geral" para servir de padrão
 -- (a aplicação também cria isso automaticamente no startup, via DataInitializer)
 IF NOT EXISTS (SELECT 1 FROM Categoria WHERE nome = 'Geral')
