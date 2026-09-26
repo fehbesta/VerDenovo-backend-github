@@ -47,6 +47,8 @@ public class GeocodingService {
     ) {
         String cepLimpo = limparCep(cep);
         String endereco = montarEndereco(logradouro, numero, cepLimpo);
+        log.info("[Geocoding] GEOAPIFY_API_KEY configurada: {}",
+                geoapifyApiKey != null && !geoapifyApiKey.isBlank());
         if (endereco.isBlank()) return Optional.empty();
 
         if (geoapifyApiKey != null && !geoapifyApiKey.isBlank()) {
@@ -64,6 +66,8 @@ public class GeocodingService {
     public Optional<Coordenadas> geocodificar(String logradouro, String numero, String cep) {
         String cepLimpo = limparCep(cep);
         String endereco = montarEndereco(logradouro, numero, cepLimpo);
+        log.info("[Geocoding] GEOAPIFY_API_KEY configurada: {}",
+                geoapifyApiKey != null && !geoapifyApiKey.isBlank());
 
         if (geoapifyApiKey != null && !geoapifyApiKey.isBlank() && !endereco.isBlank()) {
             Optional<Coordenadas> geoapify = tentarGeoapify(endereco, numero);
@@ -99,42 +103,67 @@ public class GeocodingService {
                     .GET()
                     .build();
 
+            log.info("[Geocoding] Iniciando chamada ao Geoapify");
             HttpResponse<String> response = httpClient.send(
                     request,
                     HttpResponse.BodyHandlers.ofString()
             );
+            log.info("[Geocoding] Chamada ao Geoapify concluída; status HTTP={}", response.statusCode());
             if (response.statusCode() != 200) {
-                log.warn("Geoapify retornou status {} na busca de endereço", response.statusCode());
+                log.warn("[Geocoding] Geoapify retornou status HTTP não-200");
                 return Optional.empty();
             }
 
             JsonNode results = objectMapper.readTree(response.body()).path("results");
-            if (!results.isArray()) return Optional.empty();
+            if (!results.isArray()) {
+                log.warn("[Geocoding] Resposta do Geoapify sem array 'results'");
+                return Optional.empty();
+            }
+            if (results.isEmpty()) {
+                log.info("[Geocoding] Resposta do Geoapify sem resultados");
+                return Optional.empty();
+            }
 
             String numeroNormalizado = normalizarNumero(numeroEsperado);
+            int indice = 0;
             for (JsonNode result : results) {
+                indice++;
                 JsonNode rank = result.path("rank");
-                String numeroEncontrado = normalizarNumero(result.path("housenumber").asText(""));
+                String numeroBruto = result.path("housenumber").asText("");
+                String numeroEncontrado = normalizarNumero(numeroBruto);
+                String tipo = result.path("result_type").asText("desconhecido");
+                double confianca = rank.path("confidence").asDouble(-1);
+                double confiancaEdificio = rank.path("confidence_building_level").asDouble(-1);
+                log.info("[Geocoding] Resultado {}: tipo={}, número retornado={}, confiança={}, confiança do nível do imóvel={}",
+                        indice, tipo, !numeroBruto.isBlank(), confianca, confiancaEdificio);
 
                 // Quando o cadastro tem número, exige que o resultado confirme esse número.
                 if (!numeroNormalizado.isBlank()
                         && !numeroNormalizado.equals(numeroEncontrado)) {
+                    log.info("[Geocoding] Resultado {} rejeitado: número do imóvel ausente ou diferente do solicitado",
+                            indice);
                     continue;
                 }
 
                 if (!numeroNormalizado.isBlank()
                         && rank.path("confidence_building_level").asDouble(0) <= 0) {
+                    log.info("[Geocoding] Resultado {} rejeitado: nível de confiança do imóvel não é positivo",
+                            indice);
                     continue;
                 }
 
                 Optional<Coordenadas> coordenadas = lerCoordenadas(result.path("properties"));
                 if (coordenadas.isPresent()) {
-                    log.info("Endereço localizado pelo Geoapify: {}", result.path("formatted").asText());
+                    log.info("[Geocoding] Resultado {} aceito: passou a validação do número e as coordenadas são válidas",
+                            indice);
                     return coordenadas;
                 }
+                log.info("[Geocoding] Resultado {} rejeitado: coordenadas ausentes ou inválidas", indice);
             }
         } catch (Exception e) {
-            log.warn("Falha ao consultar Geoapify: {}", e.getMessage());
+            // Não registrar a mensagem: exceções HTTP podem incluir a URI com a chave.
+            log.warn("[Geocoding] Falha ao consultar ou interpretar a resposta do Geoapify ({})",
+                    e.getClass().getSimpleName());
         }
 
         return Optional.empty();
