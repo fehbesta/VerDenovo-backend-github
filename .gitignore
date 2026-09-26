@@ -1,0 +1,16 @@
+# Variaveis de ambiente - NUNCA commitar
+.env
+.env.local
+
+# Configuracoes locais com credenciais - NUNCA commitar
+src/main/resources/application-local.properties
+
+# Maven
+target/
+*.jar
+*.war
+
+# IDE
+.idea/
+.vscode/
+*.iml
